@@ -1,0 +1,33 @@
+{
+  "name": "opencode-smart-context",
+  "version": "0.1.0",
+  "private": true,
+  "author": "roboroddom",
+  "license": "0BSD AND MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/roboroddom/opencode-smart-context.git" },
+  "homepage": "https://github.com/roboroddom/opencode-smart-context#readme",
+  "bugs": { "url": "https://github.com/roboroddom/opencode-smart-context/issues" },
+  "description": "Model-directed context renewal and HANDOFF checkpoints for OpenCode V1",
+  "keywords": ["opencode", "opencode-plugin", "context", "handoff", "tui"],
+  "type": "module",
+  "main": "./index.ts",
+  "exports": { ".": "./index.ts", "./server": "./index.ts", "./tui": "./tui.tsx" },
+  "files": ["index.ts", "core.ts", "store.ts", "tui.tsx", "CONTEXT-CONTINUITY-PROMPT.md", "LICENSE", "NOTICE.md", "README.md", "README.ru.md", "CONTRIBUTING.md", "CHANGELOG.md", "RELEASE-CHECKLIST.md", "UI-КАРТА.md", "bun.lock"],
+  "scripts": {
+    "test": "bun test --timeout 30000",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun scripts/check-docs.ts && bun test --timeout 30000",
+    "check:docs": "bun scripts/check-docs.ts",
+    "test:e2e": "bun test tests/e2e.test.ts --timeout 30000",
+    "test:ui": "bun tests/ui-smoke.ts",
+    "check:package": "bun scripts/check-package.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.34",
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "solid-js": "1.9.10"
+  },
+  "devDependencies": { "typescript": "5.8.2", "@types/bun": "1.3.13" }
+}
