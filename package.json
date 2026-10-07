@@ -12,7 +12,7 @@
   "type": "module",
   "main": "./index.ts",
   "exports": { ".": "./index.ts", "./server": "./index.ts", "./tui": "./tui.tsx" },
-  "files": ["index.ts", "core.ts", "store.ts", "tui.tsx", "CONTEXT-CONTINUITY-PROMPT.md", "LICENSE", "NOTICE.md", "README.md", "README.ru.md", "CONTRIBUTING.md", "CHANGELOG.md", "RELEASE-CHECKLIST.md", "UI-КАРТА.md", "bun.lock"],
+  "files": ["index.ts", "core.ts", "store.ts", "tui.tsx", "CONTEXT-CONTINUITY-PROMPT.md", "LICENSE", "NOTICE.md", "README.md", "README.ru.md", "CONTRIBUTING.md", "bun.lock"],
   "scripts": {
     "test": "bun test --timeout 30000",
     "typecheck": "tsc --noEmit",

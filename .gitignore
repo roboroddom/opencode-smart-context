@@ -3,3 +3,6 @@ dist/
 coverage/
 *.log
 .DS_Store
+/UI-КАРТА.md
+/RELEASE-CHECKLIST.md
+/CHANGELOG.md

@@ -109,7 +109,7 @@ If `/undo` removes a boundary, use `/redo` where possible or start a new session
 
 `bun run check` · `bun run check:package` — types, documents, tests, and archive checks; local mock provider, no subscription usage.
 
-[Development guide](CONTRIBUTING.md) · [Release checklist](RELEASE-CHECKLIST.md) · [UI checks](UI-КАРТА.md)
+[Development guide](CONTRIBUTING.md)
 
 The project's own code uses [0BSD](LICENSE): use, modify, and redistribute it freely, without an attribution requirement. [NOTICE.md](NOTICE.md) preserves the separate MIT notice for the technique adapted from [opencode-cache-compact](https://github.com/lennartschoch/opencode-cache-compact).
 

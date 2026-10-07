@@ -109,7 +109,7 @@ bun install --frozen-lockfile
 
 `bun run check` · `bun run check:package` — типы, документы, тесты и архив; локальный подставной провайдер, без расхода подписки.
 
-[Разработка](CONTRIBUTING.md) · [Чек-лист выпуска](RELEASE-CHECKLIST.md) · [Проверки интерфейса](UI-КАРТА.md)
+[Разработка](CONTRIBUTING.md)
 
 Собственный код — под [0BSD](LICENSE): можно свободно использовать, менять и распространять без требования указывать автора. [NOTICE.md](NOTICE.md) сохраняет отдельное MIT-уведомление приёма из [opencode-cache-compact](https://github.com/lennartschoch/opencode-cache-compact).
 

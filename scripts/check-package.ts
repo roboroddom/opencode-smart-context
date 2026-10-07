@@ -13,7 +13,7 @@ async function run(command: string[], cwd: string, env = process.env) {
 }
 
 // Разрешённый состав проверяется отдельно от списка files, чтобы случайное расширение не прошло незаметно.
-const expected = ["package.json", "index.ts", "core.ts", "store.ts", "tui.tsx", "CONTEXT-CONTINUITY-PROMPT.md", "LICENSE", "NOTICE.md", "README.md", "README.ru.md", "CONTRIBUTING.md", "CHANGELOG.md", "RELEASE-CHECKLIST.md", "UI-КАРТА.md", "bun.lock"].sort()
+const expected = ["package.json", "index.ts", "core.ts", "store.ts", "tui.tsx", "CONTEXT-CONTINUITY-PROMPT.md", "LICENSE", "NOTICE.md", "README.md", "README.ru.md", "CONTRIBUTING.md", "bun.lock"].sort()
 await run(["npm", "pack", "--ignore-scripts", "--pack-destination", root], project)
 const archives = readdirSync(root).filter(name => name.endsWith(".tgz"))
 if (archives.length !== 1) throw new Error("Expected exactly one package archive")
