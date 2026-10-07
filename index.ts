@@ -4,7 +4,7 @@ import { dirname, resolve, basename } from "node:path"
 import { fileURLToPath } from "node:url"
 import { randomUUID } from "node:crypto"
 import { Store, hash, type ModelRef, type Transition } from "./store.ts"
-import { TOOL, NEW_SESSION_PERMISSION, cutMessages, reality, realUser, reconcile, usageOf, type Message } from "./core.ts"
+import { TOOL, NEW_SESSION_PERMISSION, cutMessages, insertNotices, reality, realUser, sourceUser, reconcile, usageOf, type Message } from "./core.ts"
 
 const promptPath = resolve(dirname(fileURLToPath(import.meta.url)), "CONTEXT-CONTINUITY-PROMPT.md")
 const RULES = readFileSync(promptPath, "utf8").split("## Working conditions")[1]
@@ -20,6 +20,7 @@ export default (async ({ client, directory }) => {
   const api = client as any
   const store = new Store()
   const driving = new Set<string>()
+  const rerun = new Set<string>()
   let disposed = false
 
   async function log(error: unknown, sessionID?: string) {
@@ -51,8 +52,19 @@ export default (async ({ client, directory }) => {
       if (!t || ["done", "error", "cancelled"].includes(t.phase)) return
       const all = await messages(sessionID)
       const statuses = unwrap(await api.session.status())
+      // Завершение доказывается ответом на сохранённое поручение, а не принятием HTTP-запроса.
+      if (t.resume && t.targetID && t.promptID) {
+        const targetHistory = t.targetID === sessionID ? all : await messages(t.targetID)
+        const finished = targetHistory.findLast(m => m.info.role === "assistant" && m.info.parentID === t!.promptID)
+        if (finished?.info.error) throw new Error("Continuation failed; it will not be retried automatically")
+        if (finished?.info.time.completed && finished.info.finish && !["tool-calls", "unknown"].includes(finished.info.finish)
+          && !finished.parts.some(p => p.type === "tool")) {
+          store.update(sessionID, directory, s => { s.transition!.phase = "done"; s.error = undefined })
+          return
+        }
+      }
       const isIdle = statuses[sessionID]?.type !== "busy" && statuses[sessionID]?.type !== "retry"
-      const latest = all.findLast(realUser)
+      const latest = sourceUser(all, t)
       const runningTools = all.some(m => m.parts.some(p => p.type === "tool" && ["pending", "running"].includes(p.state?.status)))
       let currentHash: string | undefined
       try { currentHash = hash(readFileSync(t.checkpoint.sourcePath, "utf8")) } catch {}
@@ -73,7 +85,7 @@ export default (async ({ client, directory }) => {
           const now = Date.now()
           store.update(sessionID, directory, s => {
             const cp = { ...t!.checkpoint, carrierID, at: now, epoch: s.epoch + 1 }
-            s.boundary = cp; s.checkpoints.push(cp); s.epoch++; s.title = cp.nextTitle
+            s.boundary = cp; s.checkpoints.push(cp); s.epoch++; s.title = cp.nextTitle; s.usage = undefined
             s.transition!.checkpoint = cp; s.transition!.targetID = sessionID; s.transition!.phase = "ready"
           })
           await api.session.update({ path: { id: sessionID }, body: { title: t.checkpoint.nextTitle } }).then(unwrap)
@@ -103,7 +115,7 @@ export default (async ({ client, directory }) => {
       }
       state = store.get(sessionID, directory); t = state.transition!
       const updatedSource = await messages(sessionID)
-      if (updatedSource.findLast(realUser)?.info.id !== t.sourceUserID) {
+      if (sourceUser(updatedSource, t)?.info.id !== t.sourceUserID || t.phase !== "dispatched" && hash(readFileSync(t.checkpoint.sourcePath, "utf8")) !== t.checkpoint.hash) {
         store.update(sessionID, directory, s => { s.transition!.phase = "cancelled"; s.error = "New user input arrived during the transition. Automatic continuation cancelled." })
         await toast("New user input received. Automatic continuation cancelled.", "warning")
         return
@@ -111,6 +123,10 @@ export default (async ({ client, directory }) => {
       const targetID = t.targetID!
       // Уникальный ID сообщения делает восстановление отправки идемпотентным.
       const targetMessages = targetID === sessionID ? await messages(sessionID) : await messages(targetID)
+      if (targetID !== sessionID && targetMessages.some(realUser)) {
+        store.update(sessionID, directory, s => { s.transition!.phase = "cancelled"; s.error = "New input arrived in the target session. Automatic continuation cancelled." })
+        return
+      }
       let admitted = targetMessages.find(m => m.parts.some(p => p.metadata?.continuityResume === t!.id))
       if (!admitted) {
         const text = t.operation === "refresh_current"
@@ -128,26 +144,28 @@ export default (async ({ client, directory }) => {
       if (t.resume) {
         const status = unwrap(await api.session.status())[targetID]
         if (status && status.type !== "idle") return
-        const finished = targetMessages.findLast(m => m.info.role === "assistant" && m.info.parentID === idFrom(admitted))
-        if (finished?.info.error) throw new Error("Continuation failed; it will not be retried automatically")
-        if (finished?.info.finish && finished.info.finish !== "tool-calls" && finished.info.time.completed) {
-          store.update(sessionID, directory, s => { s.transition!.phase = "done"; s.error = undefined })
-          return
-        }
         // Повторяется тот же ID и те же части, а не создаётся второе поручение после аварии.
+        store.update(sessionID, directory, s => { s.transition!.phase = "dispatched" })
         await api.session.promptAsync({ path: { id: targetID }, body: {
           messageID: idFrom(admitted), agent: t.agent, ...modelBody(t.model), parts: admitted.parts,
         } }).then(unwrap)
-        store.update(sessionID, directory, s => { s.transition!.phase = "dispatched" })
+        await toast(t.operation === "refresh_current" ? `Context refreshed. Stage ${state.epoch}.` : `Opened session “${t.checkpoint.nextTitle}”.`, "success")
+        return
       }
       store.update(sessionID, directory, s => { s.transition!.phase = "done"; s.error = undefined })
       await toast(t.operation === "refresh_current" ? `Context refreshed. Stage ${state.epoch}.` : `Opened session “${t.checkpoint.nextTitle}”.`, "success")
     } catch (error) {
       store.update(sessionID, directory, s => { s.error = String(error); if (s.transition) { s.transition.error = String(error); s.transition.phase = "error" } })
       await log(error, sessionID); await toast(`Transition stopped: ${String(error)}`, "error")
-    } finally { driving.delete(sessionID); release() }
+    } finally {
+      driving.delete(sessionID); release()
+      if (rerun.delete(sessionID) && !disposed) schedule(sessionID)
+    }
   }
-  function schedule(sessionID: string) { queueMicrotask(() => { void runTransition(sessionID) }) }
+  function schedule(sessionID: string) {
+    if (driving.has(sessionID)) { rerun.add(sessionID); return }
+    queueMicrotask(() => { void runTransition(sessionID) })
+  }
 
   // Отложенное восстановление начинается после завершения инициализации серверного плагина.
   const recovery = setTimeout(() => {
@@ -192,12 +210,19 @@ export default (async ({ client, directory }) => {
       if (!sessionID) return
       const state = store.get(sessionID, directory)
       cutMessages(all, state)
-      if (!store.enabled(directory, sessionID)) return
-      const user = all.findLast(m => m.info.role === "user")
-      if (!user) return
-      all.push({ info: { ...user.info, id: `${user.info.id}_continuity` }, parts: [
-        { type: "text", text: reality(state, all), synthetic: true, ignored: false },
-      ] })
+      const anchor = all.at(-1)
+      const activeIDs = new Set(all.map(m => m.info.id))
+      let outgoingState = state
+      if (anchor && store.enabled(directory, sessionID) && !state.notices?.some(n => n.afterID === anchor.info.id)) {
+        const measuredHistory = [...all]
+        insertNotices(measuredHistory, state)
+        const text = reality(state, measuredHistory)
+        outgoingState = store.update(sessionID, directory, s => {
+          s.notices = (s.notices ?? []).filter(n => activeIDs.has(n.afterID))
+          if (!s.notices.some(n => n.afterID === anchor.info.id)) s.notices.push({ afterID: anchor.info.id, text })
+        })
+      }
+      insertNotices(all, outgoingState)
     },
     event: async ({ event }: any) => {
       if (event.type === "session.created") {
@@ -208,9 +233,10 @@ export default (async ({ client, directory }) => {
       if (event.type === "message.updated") {
         const info = event.properties.info
         if (info.role === "assistant" && !info.summary && usageOf(info.tokens).total > 0) {
-          store.update(info.sessionID, directory, s => { s.usage = {
-            ...usageOf(info.tokens), context: s.contextLimit ?? 0, messageID: info.id, at: Date.now(),
-          } })
+          store.update(info.sessionID, directory, s => {
+            if (s.boundary && info.time.created <= s.boundary.at || s.usage?.created && info.time.created < s.usage.created) return
+            s.usage = { ...usageOf(info.tokens), context: s.contextLimit ?? 0, messageID: info.id, at: Date.now(), created: info.time.created }
+          })
         }
       }
       if (event.type === "session.status") {
@@ -243,13 +269,15 @@ export default (async ({ client, directory }) => {
             store.update(sessionID, directory, s => { s.title = args.current_title })
             return "Title updated without a separate model request."
           }
-          if (state.transition && !["done", "cancelled", "error"].includes(state.transition.phase)) throw new Error("The previous transition is still in progress")
+          const all = await messages(sessionID)
+          const assistant = all.find(m => m.info.id === context.messageID)
+          // Уже начавшийся новый этап вправе подготовить следующую границу, не ожидая конца всей задачи.
+          const continuing = state.transition?.phase === "dispatched" && assistant?.info.parentID === state.transition.promptID
+          if (state.transition && !["done", "cancelled", "error"].includes(state.transition.phase) && !continuing) throw new Error("The previous transition is still in progress")
           if (!args.handoff_path || !args.continuation?.trim() || !args.next_title) throw new Error("Save HANDOFF first; provide its path, the next step, and the continuation title")
           const path = realpathSync(resolve(context.directory, args.handoff_path))
           if (!/\.(md|txt)$/i.test(basename(path))) throw new Error("The handoff must be a text state file")
-          const all = await messages(sessionID)
-          const latest = all.findLast(realUser)
-          const assistant = all.find(m => m.info.id === context.messageID)
+          const latest = sourceUser(all)
           const parentIndex = all.findIndex(m => m.info.id === assistant?.info.parentID)
           if (!latest || parentIndex < 0 || all.indexOf(latest) > parentIndex) throw new Error("New user input arrived. Incorporate it into HANDOFF first")
           const stat = statSync(path)

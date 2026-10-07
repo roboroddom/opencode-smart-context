@@ -4,7 +4,8 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 export type ModelRef = { providerID: string; modelID: string; variant?: string }
-export type Usage = { input: number; total: number; context: number; messageID: string; at: number }
+export type Usage = { input: number; total: number; context: number; messageID: string; at: number; created?: number }
+export type Notice = { afterID: string; text: string }
 export type Checkpoint = {
   id: string; at: number; title: string; path: string; hash: string; sourcePath: string
   carrierID?: string; continuation: string; nextTitle: string; epoch: number
@@ -19,6 +20,7 @@ export type SessionState = {
   version: 1; sessionID: string; directory: string; enabled?: boolean; epoch: number
   usage?: Usage; contextLimit?: number; model?: ModelRef; agent?: string; latestUserID?: string
   checkpoints: Checkpoint[]; boundary?: Checkpoint; transition?: Transition
+  notices?: Notice[]
   originID?: string; nextSessionID?: string; title?: string; error?: string
 }
 

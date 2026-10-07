@@ -20,6 +20,10 @@ let base: string
 let eventAbort = new AbortController()
 let launchEnv: Record<string, string | undefined>
 let refreshID: string
+let cacheID: string
+let cacheLastRequest: any
+let releaseDelayed: (() => void) | undefined
+let delayOnce = true
 const handoff = "# Состояние проекта\n\nЦель: проверить достоверную передачу контекста.\nСделано: записан файл состояния.\nПроверки: подставная модель и изолированная база.\nСледующий шаг: продолжить с короткой историей, сохранив исходные ограничения.\n"
 
 async function until<T>(read: () => T | Promise<T>, timeout = 15000): Promise<NonNullable<T>> {
@@ -66,20 +70,55 @@ function stream(toolCall?: { name: string; args: unknown }, text = "Ответ �
   ]
   return new Response(chunks.map(c => `data: ${JSON.stringify({ ...header, ...c })}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream" } })
 }
+function responsesStream(toolCall?: { name: string; args: unknown }) {
+  const id = `resp_${requests.length}`
+  const item = toolCall
+    ? { id: `fc_${requests.length}`, type: "function_call", call_id: `call_${requests.length}`, name: toolCall.name, arguments: JSON.stringify(toolCall.args), status: "completed" }
+    : { id: `msg_${requests.length}`, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "CACHE_PREFIX_DONE", annotations: [] }] }
+  const response = { id, object: "response", model: "gpt-continuity-responses", status: "completed", output: [item], usage: { input_tokens: 250000, output_tokens: 20, total_tokens: 250020, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 12345 }, output_tokens_details: { reasoning_tokens: 0 } } }
+  const chunks: any[] = [
+    { type: "response.created", response: { ...response, status: "in_progress", output: [], usage: null } },
+    { type: "response.output_item.added", output_index: 0, item: toolCall ? { ...item, status: "in_progress", arguments: "" } : { ...item, status: "in_progress", content: [] } },
+    ...(toolCall
+      ? [{ type: "response.function_call_arguments.delta", item_id: item.id, output_index: 0, delta: JSON.stringify(toolCall.args) }, { type: "response.function_call_arguments.done", item_id: item.id, output_index: 0, arguments: JSON.stringify(toolCall.args) }]
+      : [{ type: "response.content_part.added", item_id: item.id, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } }, { type: "response.output_text.delta", item_id: item.id, output_index: 0, content_index: 0, delta: "CACHE_PREFIX_DONE" }, { type: "response.output_text.done", item_id: item.id, output_index: 0, content_index: 0, text: "CACHE_PREFIX_DONE" }]),
+    { type: "response.output_item.done", output_index: 0, item },
+    { type: "response.completed", response },
+  ]
+  return new Response(chunks.map((chunk, index) => `event: ${chunk.type}\ndata: ${JSON.stringify({ ...chunk, sequence_number: index })}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } })
+}
 beforeAll(async () => {
   console.log(`E2E sandbox: ${root}`)
   modelServer = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
-    if (!req.url.endsWith("/chat/completions")) return new Response("not found", { status: 404 })
+    if (!req.url.endsWith("/chat/completions") && !req.url.endsWith("/responses")) return new Response("not found", { status: 404 })
     const body = await req.json() as any
     requests.push(body)
+    if (req.url.endsWith("/responses")) {
+      const results = body.input.filter((m: any) => m.type === "function_call_output")
+      return responsesStream(results.length < 3 ? { name: "context_handoff", args: { operation: "label_current", current_title: "Проверка кеша Responses" } } : undefined)
+    }
     const text = JSON.stringify(body.messages)
-    if (text.includes("CASE_REFRESH") || text.includes("CASE_NEW") || text.includes("CASE_REJECT")) {
+    if (text.includes("CASE_CACHE_PREFIX")) {
+      const results = body.messages.filter((m: any) => m.role === "tool")
+      return results.length < 3
+        ? stream({ name: "context_handoff", args: { operation: "label_current", current_title: "Проверка стабильного кеша" } })
+        : stream(undefined, "CACHE_PREFIX_DONE")
+    }
+    if (text.includes("CONTINUE_AFTER_DELAY") && !text.includes("CASE_DELAY_REFRESH")) {
+      if (!delayOnce) return stream(undefined, "RECOVERED_AFTER_RESTART", 5000)
+      delayOnce = false
+      await new Promise<void>(resolve => { releaseDelayed = resolve })
+      return stream(undefined, "DELAYED_RESPONSE", 5000)
+    }
+    if (text.includes("CASE_REFRESH") || text.includes("CASE_NEW") || text.includes("CASE_REJECT") || text.includes("NEW_CHAIN_CONTINUE") || text.includes("CASE_DELAY_REFRESH")) {
       const toolResults = body.messages.filter((m: any) => m.role === "tool")
       if (!toolResults.length) return stream({ name: "apply_patch", args: { patchText: `*** Begin Patch\n*** ${Bun.file(join(project, "HANDOFF.md")).size ? "Update" : "Add"} File: ${join(project, "HANDOFF.md")}\n${Bun.file(join(project, "HANDOFF.md")).size ? "@@\n-" + handoff.trimEnd().split("\n").join("\n-") + "\n" : ""}+${handoff.trimEnd().split("\n").join("\n+")}\n*** End Patch` } })
       if (toolResults.length === 1) return stream({ name: "context_handoff", args: {
-        operation: text.includes("CASE_REFRESH") ? "refresh_current" : "start_session",
+        operation: text.includes("CASE_REFRESH") || text.includes("NEW_CHAIN_CONTINUE") || text.includes("CASE_DELAY_REFRESH") ? "refresh_current" : "start_session",
         handoff_path: join(project, "HANDOFF.md"), current_title: "Проверка исходной работы", next_title: "Продолжение проверки",
-        continuation: text.includes("CASE_REFRESH") ? "CONTINUE_AFTER_REFRESH: проверить сохранённое состояние." : "NEW_TOPIC_ONLY: самостоятельная задача; нужный файл /project/target.ts.", resume: true,
+        continuation: text.includes("CASE_DELAY_REFRESH") ? "CONTINUE_AFTER_DELAY: продолжить после задержки."
+          : text.includes("CASE_NEW_CHAIN") || text.includes("CASE_REFRESH_CHAIN") ? "NEW_CHAIN_CONTINUE: продолжить и обновить контекст без ручного сообщения."
+          : text.includes("CASE_REFRESH") || text.includes("NEW_CHAIN_CONTINUE") ? "CONTINUE_AFTER_REFRESH: проверить сохранённое состояние." : "NEW_TOPIC_ONLY: самостоятельная задача; нужный файл /project/target.ts.", resume: !text.includes("CASE_REFRESH_PAUSE"),
       } })
       return stream(undefined, "Передача подготовлена, управление возвращено.")
     }
@@ -90,9 +129,12 @@ beforeAll(async () => {
   const reserve = Bun.serve({ port: 0, fetch: () => new Response("") })
   const port = reserve.port!; reserve.stop(true)
   base = `http://127.0.0.1:${port}`
-  const config = { plugin: [join(pluginDirectory, "index.ts")], model: "mock/gpt-continuity-test", snapshot: false,
+  writeFileSync(join(project, "AUDIT-INSTRUCTIONS.md"), "STABLE_INSTRUCTION_V1")
+  const config = { plugin: [join(pluginDirectory, "index.ts")], instructions: [join(project, "AUDIT-INSTRUCTIONS.md")], model: "mock/gpt-continuity-test", snapshot: false,
     provider: { mock: { npm: "@ai-sdk/openai-compatible", name: "Mock", options: { baseURL: `http://127.0.0.1:${modelServer.port}/v1`, apiKey: "test" }, models: {
       "gpt-continuity-test": { name: "Test", limit: { context: 1000000, output: 4096 } },
+    } }, mockresponses: { npm: "@ai-sdk/openai", name: "Mock Responses", options: { baseURL: `http://127.0.0.1:${modelServer.port}/v1`, apiKey: "test" }, models: {
+      "gpt-continuity-responses": { name: "Responses test", limit: { context: 1000000, output: 4096 }, variants: { high: { reasoningEffort: "high" } } },
     } } },
   }
   writeFileSync(join(root, "config.json"), JSON.stringify(config, null, 2))
@@ -110,17 +152,62 @@ beforeAll(async () => {
   await until(() => events.some(e => e.type === "server.connected"))
 }, 30000)
 afterAll(async () => {
+  releaseDelayed?.()
   eventAbort.abort()
   processServer?.kill()
   modelServer?.stop(true)
 })
-async function session(text: string) {
+async function session(text: string, providerID = "mock") {
   const created = await request("/session", { title: "Изолированная проверка" })
-  await request(`/session/${created.id}/prompt_async`, { model: { providerID: "mock", modelID: "gpt-continuity-test" }, agent: "build", parts: [{ type: "text", text }] })
+  await request(`/session/${created.id}/prompt_async`, { model: { providerID, modelID: providerID === "mock" ? "gpt-continuity-test" : "gpt-continuity-responses" }, variant: providerID === "mock" ? undefined : "high", agent: "build", parts: [{ type: "text", text }] })
   return created.id as string
+}
+async function restartServer() {
+  eventAbort.abort()
+  processServer.kill(); await processServer.exited
+  processServer = Bun.spawn([opencode!, "serve", "--port", new URL(base).port, "--hostname", "127.0.0.1"], {
+    cwd: project, env: launchEnv, stdout: Bun.file(join(root, "restart.stdout.log")), stderr: Bun.file(join(root, "restart.stderr.log")),
+  })
+  await until(async () => { try { return (await fetch(base + "/global/health", { signal: AbortSignal.timeout(1000) })).ok } catch { return false } }, 20000)
+  eventAbort = new AbortController()
+  const count = events.length
+  void listenEvents()
+  await until(() => events.slice(count).some(e => e.type === "server.connected"))
 }
 
 describe("Реальный OpenCode V1 и подставной провайдер", () => {
+  test("сохраняет ранее отправленные границы кеша между вызовами инструментов", async () => {
+    const start = requests.length
+    const id = await session("CASE_CACHE_PREFIX")
+    cacheID = id
+    await until(async () => (await request(`/session/${id}/message`)).some((m: any) => m.info.finish === "stop"))
+    const calls = requests.slice(start)
+    expect(calls).toHaveLength(4)
+    for (let index = 1; index < calls.length; index++) {
+      const previous = calls[index - 1].messages
+      expect(calls[index].messages.slice(0, previous.length)).toEqual(previous)
+      expect(calls[index].tools).toEqual(calls[0].tools)
+    }
+    cacheLastRequest = calls.at(-1)
+  }, 30000)
+  test("Responses API сохраняет весь прошлый input и определения инструментов", async () => {
+    const start = requests.length
+    const id = await session("CASE_RESPONSES_CACHE", "mockresponses")
+    await until(async () => (await request(`/session/${id}/message`)).some((m: any) => m.info.finish === "stop"))
+    const calls = requests.slice(start)
+    expect(calls).toHaveLength(4)
+    for (let index = 1; index < calls.length; index++) {
+      const previous = calls[index - 1].input
+      expect(calls[index].input.slice(0, previous.length)).toEqual(previous)
+      expect(calls[index].tools).toEqual(calls[0].tools)
+      expect(calls[index].reasoning.effort).toBe("high")
+      expect(calls[index].prompt_cache_key).toBe(id)
+    }
+    const history = await request(`/session/${id}/message`)
+    const tokens = history.findLast((m: any) => m.info.role === "assistant").info.tokens
+    expect(tokens.input + tokens.cache.read + tokens.cache.write).toBe(250000)
+    expect(tokens.cache.write).toBe(12345)
+  }, 30000)
   test("выключение до первого сообщения удаляет инструкции и схему инструмента", async () => {
     store.setEnabled(project, false)
     const start = requests.length
@@ -153,16 +240,7 @@ describe("Реальный OpenCode V1 и подставной провайде�
     // Имитируем аварию после ответа провайдера, но до окончательной отметки отправки.
     store.update(refreshID, project, s => { s.transition!.phase = "ready" })
     const beforeRestart = requests.length
-    eventAbort.abort()
-    processServer.kill(); await processServer.exited
-    processServer = Bun.spawn([opencode, "serve", "--port", new URL(base).port, "--hostname", "127.0.0.1"], {
-      cwd: project, env: launchEnv, stdout: Bun.file(join(root, "restart.stdout.log")), stderr: Bun.file(join(root, "restart.stderr.log")),
-    })
-    await until(async () => { try { return (await fetch(base + "/global/health", { signal: AbortSignal.timeout(1000) })).ok } catch { return false } }, 20000)
-    eventAbort = new AbortController()
-    const count = events.length
-    void listenEvents()
-    await until(() => events.slice(count).some(e => e.type === "server.connected"))
+    await restartServer()
     await request(`/session/${refreshID}`)
     await until(() => store.get(refreshID, project).transition?.phase === "done")
     expect(requests.length).toBe(beforeRestart)
@@ -175,6 +253,12 @@ describe("Реальный OpenCode V1 и подставной провайде�
     expect(JSON.stringify(body.messages)).not.toContain("OLD_ONLY_SECRET")
     expect(JSON.stringify(body.messages)).not.toContain("## Context continuity")
     expect(JSON.stringify(body.tools)).not.toContain("context_handoff")
+    // Исторические заметки остаются неизменными после перезапуска и выключения помощника.
+    store.setEnabled(project, false, cacheID)
+    const cacheStart = requests.length
+    await request(`/session/${cacheID}/prompt_async`, { model: { providerID: "mock", modelID: "gpt-continuity-test" }, agent: "build", parts: [{ type: "text", text: "CACHE_AFTER_RESTART" }] })
+    await until(() => requests.length > cacheStart)
+    expect(requests[cacheStart].messages.slice(1, cacheLastRequest.messages.length)).toEqual(cacheLastRequest.messages.slice(1))
   }, 30000)
   test("создаёт отдельную сессию только после явного разрешения и не переносит старую тему", async () => {
     const start = requests.length
@@ -199,6 +283,35 @@ describe("Реальный OpenCode V1 и подставной провайде�
     await until(async () => !(await request("/session/status"))[id])
     expect(store.get(id, project).nextSessionID).toBeUndefined()
   }, 30000)
+  test("новая сессия может обновить контекст в автоматическом продолжении без ручного ввода", async () => {
+    const id = await session("CASE_NEW_CHAIN OLD_TOPIC_ONLY")
+    const approval = await until(() => events.find(e => e.type === "permission.asked" && e.properties.sessionID === id))
+    await request(`/session/${id}/permissions/${approval.properties.id}`, { response: "once" })
+    const target = await until(() => store.get(id, project).nextSessionID)
+    await until(() => store.get(target, project).transition?.phase === "done")
+    expect(store.get(target, project).epoch).toBe(2)
+    expect(store.get(target, project).transition?.operation).toBe("refresh_current")
+  }, 30000)
+  test("не считает отправку завершением и восстанавливает прерванное продолжение после перезапуска", async () => {
+    const id = await session("CASE_DELAY_REFRESH")
+    await until(() => releaseDelayed && store.get(id, project).transition?.phase === "dispatched")
+    const promptID = store.get(id, project).transition!.promptID
+    expect(store.get(id, project).transition!.phase).not.toBe("done")
+    await restartServer()
+    releaseDelayed!()
+    await request(`/session/${id}`)
+    await until(() => store.get(id, project).transition?.phase === "done")
+    const history = await request(`/session/${id}/message`)
+    expect(history.filter((m: any) => m.parts.some((p: any) => p.metadata?.continuityResume))).toHaveLength(1)
+    expect(store.get(id, project).transition!.promptID).toBe(promptID)
+    expect(JSON.stringify(history)).toContain("RECOVERED_AFTER_RESTART")
+  }, 30000)
+  test("автоматическое продолжение той же сессии может сделать следующую границу", async () => {
+    const id = await session("CASE_REFRESH_CHAIN")
+    await until(() => store.get(id, project).epoch === 3 && store.get(id, project).transition?.phase === "done")
+    expect(store.get(id, project).checkpoints).toHaveLength(2)
+    expect(store.get(id, project).transition?.targetID).toBe(id)
+  }, 30000)
   test("новое уточнение во время разрешения отменяет устаревший переход", async () => {
     const id = await session("CASE_NEW_CHANGED")
     const approval = await until(() => events.find(e => e.type === "permission.asked" && e.properties.sessionID === id))
@@ -206,5 +319,29 @@ describe("Реальный OpenCode V1 и подставной провайде�
     await request(`/session/${id}/permissions/${approval.properties.id}`, { response: "once" })
     await until(() => store.get(id, project).transition?.phase === "cancelled")
     expect(store.get(id, project).nextSessionID).toBeUndefined()
+  }, 30000)
+  test("resume=false сохраняет короткий контекст и не запускает модель до сообщения владельца", async () => {
+    const start = requests.length
+    const id = await session("CASE_REFRESH_PAUSE")
+    await until(() => store.get(id, project).transition?.phase === "done")
+    expect(requests.length - start).toBe(3)
+    expect(store.get(id, project).epoch).toBe(2)
+    const history = await request(`/session/${id}/message`)
+    const continuation = history.find((m: any) => m.parts.some((p: any) => p.metadata?.continuityResume))
+    expect(history.some((m: any) => m.info.role === "assistant" && m.info.parentID === continuation.info.id)).toBe(false)
+    await request(`/session/${id}/prompt_async`, { model: { providerID: "mock", modelID: "gpt-continuity-test" }, agent: "build", parts: [{ type: "text", text: "CONTINUE_PAUSED_STAGE" }] })
+    await until(() => requests.length > start + 3)
+    expect(JSON.stringify(requests[start + 3].messages)).not.toContain("CASE_REFRESH_PAUSE")
+    await until(async () => !(await request("/session/status"))[id])
+  }, 30000)
+  test("OpenCode перечитывает файлы системных инструкций между запросами без перезапуска", async () => {
+    writeFileSync(join(project, "AUDIT-INSTRUCTIONS.md"), "STABLE_INSTRUCTION_V2")
+    try {
+      const start = requests.length
+      const id = await session("CASE_SYSTEM_RELOAD")
+      await until(async () => (await request(`/session/${id}/message`)).some((m: any) => m.info.finish === "stop"))
+      expect(JSON.stringify(requests[start].messages)).toContain("STABLE_INSTRUCTION_V2")
+      expect(JSON.stringify(requests[start].messages)).not.toContain("STABLE_INSTRUCTION_V1")
+    } finally { writeFileSync(join(project, "AUDIT-INSTRUCTIONS.md"), "STABLE_INSTRUCTION_V1") }
   }, 30000)
 })

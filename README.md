@@ -55,6 +55,8 @@ When enabled, the plugin adds the following to each normal request:
 - The `context_handoff` tool description from [index.ts](index.ts).
 - Current usage and remaining-room estimates generated in [core.ts](core.ts).
 
+Already-sent usage notices are saved in plugin state and replayed at their original positions with unchanged numbers. A new notice follows new history; a refresh drops notices from the previous stage. This preserves cache boundaries, while cache hits remain provider-controlled. Disabling the helper stops new notices without removing earlier ones.
+
 These are the instructions the creator finds comfortable to work with. Edit `CONTEXT-CONTINUITY-PROMPT.md` to suit your workflow, then restart OpenCode. Preserve the `## Working conditions` heading: the loader uses it as the start of the instructions.
 
 Your work state lives in a separate project HANDOFF. A current-chat refresh substitutes its snapshot for old history; a different chat receives only the request the model prepared for the new topic.
